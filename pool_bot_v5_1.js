@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         DonutLuck Pool Bot v5.1 — GOD MODE (fixed)
+// @name         DonutLuck Pool Bot v6 — BLACK BALL + PATH FIX
 // @namespace    http://tampermonkey.net/
-// @version      5.1
-// @description  Fixed: LOS sign bug, 8-ball targeting, scratch distance, spin fallback
+// @version      6.0
+// @description  Fixed: black ball target ordering, pocket line blockers, improved path detection, safer shot selection
 // @author       ENI
 // @match        https://donutluck.com/*
 // @match        https://www.donutluck.com/*
@@ -42,7 +42,6 @@
     {axis:'x',val:L  },
   ];
 
-  // Spin options tried per shot (for position play)
   const SPIN_OPTS = [
     {sx:0,   sy:0,   label:'stun'    },
     {sx:0,   sy:400, label:'follow'  },
@@ -57,7 +56,7 @@
     {sx:-350,sy:-350,label:'l+draw'  },
   ];
 
-  const POS_WEIGHT = 0.38; // how much next-shot position matters vs current shot difficulty
+  const POS_WEIGHT = 0.38;
 
   // ═══════════════════════════════════════════════════════════════════════════
   //  AUTH
@@ -68,7 +67,7 @@
     try {
       for (const p of url.split('/').reverse())
         if (p.startsWith('eyJ')) return p.split('?')[0];
-    } catch(_) {}
+    } catch (_) {}
     return null;
   }
   function findJWT(o) {
@@ -115,8 +114,8 @@
   //  VECTOR HELPERS
   // ═══════════════════════════════════════════════════════════════════════════
   function vLen(x, y)   { return Math.hypot(x, y); }
-  function vNorm(x, y)  { const l = vLen(x,y); return l<1e-12?[0,0]:[x/l,y/l]; }
-  function vDot(ax,ay,bx,by) { return ax*bx+ay*by; }
+  function vNorm(x, y)  { const l = vLen(x,y); return l < 1e-12 ? [0,0] : [x/l, y/l]; }
+  function vDot(ax,ay,bx,by) { return ax*bx + ay*by; }
 
   // ═══════════════════════════════════════════════════════════════════════════
   //  ANGLE FIELD
@@ -126,34 +125,25 @@
     return toField(Math.atan2(FLIP_Y ? -dy : dy, dx) * (180/Math.PI));
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  //  POWER  —  separate cue-travel from target-to-pocket distance
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
+  //  POWER
+  // ═══════════════════════════════════════════════════════════════════
   function calcPower(cueDist, tgtDist) {
     const vTgt  = 0.55 + tgtDist * 1.45;
-    const vNeed = vTgt  + cueDist * 0.55;
+    const vNeed = vTgt + cueDist * 0.55;
     const v     = Math.min(Math.max(vNeed, V_MIN), V_MAX * 0.90);
     const r     = (v - V_MIN) / (V_MAX - V_MIN);
     return Math.max(220, Math.min(950, Math.round(Math.pow(r, 1/POW_EXP) * 1000)));
   }
 
-  // Velocity from power field
   function powerToVel(power) {
     return V_MIN + Math.pow(power/1000, POW_EXP) * (V_MAX - V_MIN);
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  //  PRECISE LINE-OF-SIGHT  — ray-sphere intersection
-  //  BUG FIX v5.1: corrected sign on b coefficient.
-  //
-  //  We solve: |A + t*(B-A) - O|² = clr²
-  //  Let e = A - O  →  |e + t*d|² = clr²
-  //  t²|d|² + 2t(d·e) + |e|² - clr² = 0
-  //  a = |d|², b = 2(d·e), c = |e|²-clr²
-  //  d·e = dx*(ax-Ox) + dy*(ay-Oy) = -(dx*(Ox-ax) + dy*(Oy-ay))
-  //      = -(dx*ox + dy*oy)   where ox=Ox-ax, oy=Oy-ay
-  //  So b = -2*(dx*ox + dy*oy)   ← the sign was WRONG in v5.0 (+2 instead of -2)
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
+  //  PRECISE LINE-OF-SIGHT
+  //  Fixed sign bug from v5.1
+  // ═══════════════════════════════════════════════════════════════════
   function losFirstHit(ax, ay, bx, by, excl, clr) {
     if (clr === undefined) clr = 2 * R;
     const dx = bx - ax, dy = by - ay;
@@ -166,22 +156,19 @@
       if (!gs.balls[i] || !Array.isArray(gs.balls[i])) continue;
       if (excl && excl.has(i)) continue;
 
-      // ox, oy = obstacle - start  (vector from A to O)
       const ox = gs.balls[i][0] - ax;
       const oy = gs.balls[i][1] - ay;
 
-      // b = 2*(d · e) = 2*(d · (A-O)) = -2*(d · (O-A)) = -2*(dx*ox + dy*oy)
-      const b    = -2 * (dx*ox + dy*oy);   // ← FIXED sign
-      const c    = ox*ox + oy*oy - clr*clr;
+      const b = -2 * (dx*ox + dy*oy);
+      const c = ox*ox + oy*oy - clr*clr;
       const disc = b*b - 4*a*c;
 
       if (disc < 0) continue;
 
       const sqrtD = Math.sqrt(disc);
-      const t1    = (-b - sqrtD) / (2*a);
-      const t2    = (-b + sqrtD) / (2*a);
+      const t1 = (-b - sqrtD) / (2*a);
+      const t2 = (-b + sqrtD) / (2*a);
 
-      // First entry point within (0, 1)
       const t = (t1 > 1e-4) ? t1 : t2;
       if (t > 1e-4 && t < minT) minT = t;
     }
@@ -190,6 +177,79 @@
 
   function pathClear(ax, ay, bx, by, excl) {
     return losFirstHit(ax, ay, bx, by, excl) >= 1.0 - 1e-6;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  v6: BALL-IN-FRONT-OF-POCKET CHECK
+  //  Prevents aiming at a ball whose pocket path is blocked by another ball
+  // ═══════════════════════════════════════════════════════════════════
+  function ballInFrontOfPocket(target, pocket, ballIdx, extra = 0.12) {
+    const dx = pocket.x - target.x;
+    const dy = pocket.y - target.y;
+    const len = vLen(dx, dy);
+    if (len < 1e-9) return null;
+
+    const nx = dx / len;
+    const ny = dy / len;
+
+    let bestIdx = null;
+    let bestProj = 1e9;
+
+    for (let i = 1; i <= 15; i++) {
+      if (!gs.balls[i] || !Array.isArray(gs.balls[i])) continue;
+      if (i === ballIdx || i === 0) continue;
+
+      const vx = gs.balls[i][0] - target.x;
+      const vy = gs.balls[i][1] - target.y;
+
+      const proj = vx * nx + vy * ny;
+      if (proj <= 0 || proj >= len) continue;
+
+      const perp = Math.abs(vx * ny - vy * nx);
+      const tol = 2.6 * R + extra;
+
+      if (perp < tol && proj < bestProj) {
+        bestProj = proj;
+        bestIdx = i;
+      }
+    }
+
+    return bestIdx;
+  }
+
+  function pathBlockedByBall(ax, ay, bx, by, excl) {
+    const dx = bx - ax;
+    const dy = by - ay;
+    const len = vLen(dx, dy);
+    if (len < 1e-9) return null;
+
+    const nx = dx / len;
+    const ny = dy / len;
+
+    let bestHit = null;
+    let bestDist = Infinity;
+
+    for (let i = 1; i <= 15; i++) {
+      if (!gs.balls[i] || !Array.isArray(gs.balls[i])) continue;
+      if (excl && excl.has(i)) continue;
+
+      const vx = gs.balls[i][0] - ax;
+      const vy = gs.balls[i][1] - ay;
+
+      const proj = vx * nx + vy * ny;
+      if (proj <= 0 || proj >= len) continue;
+
+      const perp = Math.abs(vx * ny - vy * nx);
+      if (perp < 2.7 * R) {
+        const d = proj / len;
+        if (d < bestDist) {
+          bestDist = d;
+          bestHit = i;
+        }
+      }
+    }
+
+    return bestHit;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -203,37 +263,39 @@
     return offAngle < 52;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   //  GHOST BALL
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   function ghostBall(cue, target, pocket, ballIdx, skipLOS) {
     const tpDx = pocket.x - target.x, tpDy = pocket.y - target.y;
     const tpL  = vLen(tpDx, tpDy);
     if (tpL < 1e-9) return null;
 
-    const [nx, ny] = vNorm(tpDx, tpDy);  // unit: target → pocket
+    const [nx, ny] = vNorm(tpDx, tpDy);
 
-    // Ghost ball = where cue centre must be to deflect target into pocket
     const gx = target.x - nx*2*R;
     const gy = target.y - ny*2*R;
     if (gx < R || gx > L-R || gy < R || gy > W-R) return null;
 
-    // Cue → ghost
     const cgDx = gx - cue.x, cgDy = gy - cue.y;
     const cgL  = vLen(cgDx, cgDy);
-    if (cgL < R*0.4) return null;
+    if (cgL < R*0.45) return null;
 
     const [cgNx, cgNy] = vNorm(cgDx, cgDy);
 
-    // Cut angle
-    const dotCut   = Math.max(-1, Math.min(1, vDot(cgNx,cgNy, nx,ny)));
+    const dotCut = Math.max(-1, Math.min(1, vDot(cgNx,cgNy, nx,ny)));
     const cutAngle = Math.acos(dotCut) * (180/Math.PI);
-    if (cutAngle > 75) return null;  // anything above 75° is near-impossible
+    if (cutAngle > 75) return null;
 
-    // Pocket entry
     if (!pocketEntryOK(target.x, target.y, pocket)) return null;
 
-    // LOS checks
+    // v6 fix: reject shot when another ball sits right on the target→pocket line
+    const blocker = pathBlockedByBall(target.x, target.y, pocket.x, pocket.y, new Set([ballIdx]));
+    if (blocker !== null) return null;
+
+    const frontBall = ballInFrontOfPocket(target, pocket, ballIdx, 0.18);
+    if (frontBall !== null) return null;
+
     if (!skipLOS) {
       if (!pathClear(cue.x, cue.y, gx, gy, new Set([0, ballIdx]))) return null;
       if (!pathClear(target.x, target.y, pocket.x, pocket.y, new Set([ballIdx]))) return null;
@@ -241,7 +303,6 @@
 
     const power = calcPower(cgL, tpL);
 
-    // Base difficulty score
     let baseScore = cgL + tpL*0.8;
     if (cutAngle > 35) baseScore += (cutAngle-35)*0.07;
     if (cutAngle > 55) baseScore += (cutAngle-55)*0.22;
@@ -255,9 +316,9 @@
     };
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   //  BANK SHOT
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   function bankShot(cue, target, pocket, cushion, ballIdx) {
     let rpx = pocket.x, rpy = pocket.y;
     if (cushion.axis === 'y') rpy = 2*cushion.val - pocket.y;
@@ -272,7 +333,6 @@
     const gy = target.y - ny*2*R;
     if (gx < R || gx > L-R || gy < R || gy > W-R) return null;
 
-    // Bounce point
     let bx, by;
     if (cushion.axis === 'y') {
       by = cushion.val;
@@ -280,7 +340,7 @@
       if (Math.abs(den) < 1e-9) return null;
       bx = target.x + (by-target.y)/den * (rpx-target.x);
       if (bx < 0.14 || bx > L-0.14) return null;
-      if (bx > 0.93 && bx < 1.31)   return null;
+      if (bx > 0.93 && bx < 1.31) return null;
     } else {
       bx = cushion.val;
       const den = rpx - target.x;
@@ -294,7 +354,7 @@
     if (cgL < R*0.4) return null;
 
     const [cgNx, cgNy] = vNorm(cgDx, cgDy);
-    const dotCut  = Math.max(-1, Math.min(1, vDot(cgNx,cgNy,nx,ny)));
+    const dotCut = Math.max(-1, Math.min(1, vDot(cgNx,cgNy,nx,ny)));
     const cutAngle = Math.acos(dotCut) * (180/Math.PI);
     if (cutAngle > 75) return null;
 
@@ -318,10 +378,9 @@
     };
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   //  CUE BALL LANDING ESTIMATOR
-  //  Returns {x, y} approximate resting position after impact + spin.
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   function estimateLanding(cuePos, shot, sx, sy) {
     const { ghost, cgNx, cgNy, nx, ny, power, cutAngle } = shot;
     if (!ghost) return ghost || cuePos;
@@ -329,34 +388,29 @@
     const cutRad = cutAngle * Math.PI / 180;
     const sinCut = Math.sin(cutRad);
 
-    // 90-degree rule: cue deflects perpendicular to line of centers
-    // Perpendicular to (nx,ny) in the direction consistent with approach
-    let cdx = -ny, cdy = nx;   // 90° CCW of line-of-centers
-    if (vDot(cdx,cdy, cgNx,cgNy) < 0) { cdx=-cdx; cdy=-cdy; } // pick correct side
+    let cdx = -ny, cdy = nx;
+    if (vDot(cdx,cdy, cgNx,cgNy) < 0) { cdx=-cdx; cdy=-cdy; }
 
-    // Apply spin
-    if (sy > 100) {  // follow: cue continues in approach direction
+    if (sy > 100) {
       const bf = Math.min(0.80, sy/1000);
       cdx = cdx*(1-bf) + cgNx*bf;  cdy = cdy*(1-bf) + cgNy*bf;
       const l = vLen(cdx,cdy); if(l>1e-9){cdx/=l;cdy/=l;}
     }
-    if (sy < -100) { // draw: cue reverses
+    if (sy < -100) {
       const bf = Math.min(0.80, Math.abs(sy)/1000);
       cdx = cdx*(1-bf) + (-cgNx)*bf;  cdy = cdy*(1-bf) + (-cgNy)*bf;
       const l = vLen(cdx,cdy); if(l>1e-9){cdx/=l;cdy/=l;}
     }
-    if (sx !== 0) {  // side spin: rotate post-impact direction
+    if (sx !== 0) {
       const a = (sx/1000)*(24*Math.PI/180);
       const cos=Math.cos(a), sin=Math.sin(a);
       const rx=cdx*cos-cdy*sin; cdy=cdx*sin+cdy*cos; cdx=rx;
     }
 
-    // Residual speed and rolling distance
-    const vCue  = powerToVel(power);
-    const vRes  = vCue * sinCut * 0.88;
+    const vCue = powerToVel(power);
+    const vRes = vCue * sinCut * 0.88;
     const rDist = 0.15 * vRes * vRes;
 
-    // Trace path with 3 cushion bounces
     let x=ghost.x, y=ghost.y, dx=cdx, dy=cdy, rem=rDist;
     for (let b=0; b<3 && rem>0.005; b++) {
       let tw=rem, wall=null;
@@ -369,14 +423,12 @@
       if(wall==='l'||wall==='r') dx=-dx; else dy=-dy;
       x=Math.max(R,Math.min(L-R,x)); y=Math.max(R,Math.min(W-R,y));
     }
-    return {x, y};
+    return {x,y};
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   //  SCRATCH CHECK
-  //  BUG FIX v5.1: max scratch distance is now based on actual rolling distance
-  //  instead of a fixed 3.5m that was rejecting clean shots.
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   function willScratch(cuePos, shot, sx, sy) {
     const { ghost, cgNx, cgNy, nx, ny, power, cutAngle } = shot;
     if (!ghost) return false;
@@ -384,19 +436,17 @@
     const cutRad = cutAngle * Math.PI / 180;
     const sinCut = Math.sin(cutRad);
 
-    // Same direction calc as estimateLanding
     let cdx = -ny, cdy = nx;
     if (vDot(cdx,cdy,cgNx,cgNy) < 0) { cdx=-cdx; cdy=-cdy; }
     if (sy >  100) { const bf=Math.min(.80,sy/1000);   cdx=cdx*(1-bf)+cgNx*bf; cdy=cdy*(1-bf)+cgNy*bf; const l=vLen(cdx,cdy);if(l>1e-9){cdx/=l;cdy/=l;} }
     if (sy < -100) { const bf=Math.min(.80,Math.abs(sy)/1000); cdx=cdx*(1-bf)+(-cgNx)*bf; cdy=cdy*(1-bf)+(-cgNy)*bf; const l=vLen(cdx,cdy);if(l>1e-9){cdx/=l;cdy/=l;} }
     if (sx !== 0)  { const a=(sx/1000)*(24*Math.PI/180),cos=Math.cos(a),sin=Math.sin(a);const rx=cdx*cos-cdy*sin;cdy=cdx*sin+cdy*cos;cdx=rx; }
 
-    if (vLen(cdx,cdy) < 0.01) return false; // stopped cue can't scratch
+    if (vLen(cdx,cdy) < 0.01) return false;
 
-    // BUG FIX: use actual rolling distance, not fixed 3.5m
     const vCue  = powerToVel(power);
     const vRes  = vCue * sinCut * 0.88;
-    const maxDist = Math.max(0.15 * vRes * vRes, 0.20); // at least 20cm
+    const maxDist = Math.max(0.15 * vRes * vRes, 0.20);
 
     let x=ghost.x, y=ghost.y, vx=cdx, vy=cdy, tr=0;
 
@@ -422,9 +472,9 @@
     return false;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   //  NEXT-SHOT SCORER
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   function scoreFromPos(cueHypo, nextTargets) {
     if (!nextTargets || !nextTargets.length) return 0;
     let best = Infinity;
@@ -439,14 +489,33 @@
     return best === Infinity ? 7.0 : best;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
+  function priorityForTarget(cue, idx) {
+    if (!gs.balls[idx] || !Array.isArray(gs.balls[idx])) return Infinity;
+    const tgt = {x:gs.balls[idx][0], y:gs.balls[idx][1]};
+    let best = Infinity;
+    for (const p of POCKETS) {
+      const s = ghostBall(cue, tgt, p, idx, true);
+      if (s && s.baseScore < best) best = s.baseScore;
+    }
+    if (best === Infinity) {
+      best = 900 + Math.hypot(tgt.x - cue.x, tgt.y - cue.y) * 25;
+    }
+    return best;
+  }
+
+  function getOrderedTargets(cue, arr) {
+    if (!arr || !arr.length) return [];
+    const copy = [...arr];
+    copy.sort((a, b) => priorityForTarget(cue, a) - priorityForTarget(cue, b));
+    return copy;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
   //  BALL HELPERS
-  //  BUG FIX v5.1: all helpers explicitly exclude ball 8 unless appropriate.
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   const isSolid  = i => i>=1 && i<=7;
   const isStripe = i => i>=9 && i<=15;
   const is8Ball  = i => i===8;
-  // Balls we can shoot at on an open table (never the 8-ball)
   const isPlayable = i => i>=1 && i<=15 && i!==8;
 
   function liveBalls(pred) {
@@ -461,71 +530,68 @@
     return n;
   }
   function cuePos() {
-    if (!gs.balls[0]||!Array.isArray(gs.balls[0])) return null;
+    if (!gs.balls[0] || !Array.isArray(gs.balls[0])) return null;
     return {x:gs.balls[0][0], y:gs.balls[0][1]};
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   //  TARGET RESOLUTION
-  //  BUG FIX v5.1: ball 8 is NEVER returned unless on8[you] is confirmed true.
-  // ═══════════════════════════════════════════════════════════════════════════
+  //  v6: black ball is allowed only if server says we are on it.
+  //  Otherwise it is excluded entirely from standard target resolution.
+  // ═══════════════════════════════════════════════════════════════════
   function resolveTargets(cue) {
     const you=gs.you, on8=gs.on8||[], grps=gs.groups||[];
 
-    // 1. Server says we're on the 8-ball
     if (you!==null && on8[you]) {
       gs.myGroup=null; gs.groupLocked=false;
       const t = liveBalls(is8Ball);
-      log(`targets: ON 8-BALL [${t}]`); return t;
+      log(`targets: ON 8-BALL [${t}]`); return getOrderedTargets(cue, t);
     }
 
-    // 2. Server confirmed our group
     if (you!==null && (grps[you]==='solids'||grps[you]==='stripes')) {
       gs.myGroup=grps[you]; gs.groupLocked=true;
       const t = liveBalls(grps[you]==='solids' ? isSolid : isStripe);
-      log(`targets: ${gs.myGroup} [${t}]`); return t;
+      log(`targets: ${gs.myGroup} [${t}]`); return getOrderedTargets(cue, t);
     }
 
-    // 3. We locked a group ourselves
     if (gs.groupLocked && gs.myGroup) {
       const pred = gs.myGroup==='solids' ? isSolid : isStripe;
-      const t    = liveBalls(pred);
-      log(`targets: locked ${gs.myGroup} [${t}]`); return t;
+      const t = liveBalls(pred);
+      log(`targets: locked ${gs.myGroup} [${t}]`); return getOrderedTargets(cue, t);
     }
 
-    // 4. Open table — score both groups, pick easier one
-    //    NEVER include ball 8 here
     const sB = liveBalls(isSolid), tB = liveBalls(isStripe);
     if (!sB.length && !tB.length) {
-      // No solids or stripes — something weird. Return any playable ball (not 8)
       const all = liveBalls(isPlayable);
-      log(`targets: no groups — any playable [${all}]`); return all;
+      log(`targets: no groups — any playable [${all}]`); return getOrderedTargets(cue, all);
     }
-    if (!sB.length) { gs.myGroup='stripes'; gs.groupLocked=true; return tB; }
-    if (!tB.length) { gs.myGroup='solids';  gs.groupLocked=true; return sB; }
+    if (!sB.length) { gs.myGroup='stripes'; gs.groupLocked=true; return getOrderedTargets(cue, tB); }
+    if (!tB.length) { gs.myGroup='solids';  gs.groupLocked=true; return getOrderedTargets(cue, sB); }
 
-    // Score best ghost-ball shot for each group (skip LOS in packed rack)
     function bestOpen(balls) {
       let best = Infinity;
       for (const idx of balls) {
         if (!gs.balls[idx]) continue;
         const tgt = {x:gs.balls[idx][0], y:gs.balls[idx][1]};
         for (const p of POCKETS) {
-          const s = ghostBall(cue, tgt, p, idx, true); // skipLOS on open table
+          const s = ghostBall(cue, tgt, p, idx, true);
           if (s && s.baseScore < best) best = s.baseScore;
         }
       }
       return best;
     }
+
     const ss=bestOpen(sB), ts=bestOpen(tB);
-    gs.myGroup = ss<=ts ? 'solids' : 'stripes'; gs.groupLocked=true;
+    gs.myGroup = ss<=ts ? 'solids' : 'stripes';
+    gs.groupLocked=true;
+    const chosen = liveBalls(gs.myGroup==='solids' ? isSolid : isStripe);
     log(`open table: solid=${ss.toFixed(2)} stripe=${ts.toFixed(2)} → ${gs.myGroup}`);
-    return liveBalls(gs.myGroup==='solids' ? isSolid : isStripe);
+    return getOrderedTargets(cue, chosen);
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   //  OPTIMAL BIH PLACEMENT  (8×6 grid search)
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   function bestBIHPos(targets) {
     if (!targets.length) return {x:HEAD_X, y:W/2};
     let bestPos={x:HEAD_X,y:W/2}, bestScore=Infinity;
@@ -554,15 +620,12 @@
     return bestPos;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   //  SAFETY PLAY
-  //  BUG FIX v5.1: explicitly excludes ball 8 from the target pool.
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   function safetyShot(cue) {
-    // Aim at the furthest playable ball (NOT ball 8) to snooker opponent
-    const pool = liveBalls(isPlayable); // ← NEVER includes ball 8
+    const pool = liveBalls(isPlayable);
     if (!pool.length) {
-      // Last resort: aim at 8-ball only if we're actually ON it
       if ((gs.on8||[])[gs.you]) {
         const pool8 = liveBalls(is8Ball);
         if (pool8.length) {
@@ -597,9 +660,9 @@
     };
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  //  BREAK SHOT  (1/3-ball offset for better spread)
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
+  //  BREAK SHOT
+  // ═══════════════════════════════════════════════════════════════════
   function breakShot(cue) {
     const apex={x:FOOT_X, y:W/2};
     let apexIdx=null, apexDist=Infinity;
@@ -611,7 +674,7 @@
     if (!apexIdx) return null;
 
     const tgt={x:gs.balls[apexIdx][0], y:gs.balls[apexIdx][1]};
-    const aimY=tgt.y + R*0.70; // 1/3-ball offset
+    const aimY=tgt.y + R*0.70;
     const adx=tgt.x-cue.x, ady=aimY-cue.y;
     log(`break → ball[${apexIdx}] 1/3-offset`);
     return {
@@ -623,17 +686,13 @@
     };
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   //  SPIN OPTIMISER
-  //  For each spin option: check scratch, estimate cue landing, score next shot.
-  //  BUG FIX v5.1: if ALL spins cause scratch, we DON'T drop the shot —
-  //  instead use the "least bad" spin (the one with the smallest chance of
-  //  actually reaching a pocket, based on minimum post-impact speed).
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   function optimiseSpin(cuePos, shot, remainingTargets) {
     let bestSpin    = null;
     let bestScore   = Infinity;
-    let leastBadSpin = null;  // fallback if everything scratches
+    let leastBadSpin = null;
     let leastBadV   = Infinity;
 
     for (const sp of SPIN_OPTS) {
@@ -644,7 +703,6 @@
         const score   = scoreFromPos(landing, remainingTargets);
         if (score < bestScore) { bestScore=score; bestSpin=sp; }
       } else {
-        // Track the spin that minimises residual speed (less likely to actually scratch)
         const vRes = powerToVel(shot.power) * Math.sin(shot.cutAngle*Math.PI/180) * 0.88;
         if (vRes < leastBadV) { leastBadV=vRes; leastBadSpin=sp; }
       }
@@ -652,14 +710,13 @@
 
     if (bestSpin) return { spin:bestSpin, posScore:bestScore };
 
-    // All spins scratch — use the least bad one and log a warning
     log(`All spins scratch for ${shot.debug} — using least bad`,'warn');
     return { spin: leastBadSpin||SPIN_OPTS[0], posScore: 10.0 };
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   //  MAIN SHOT PICKER
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   function pickShot() {
     const cp   = cuePos();
     if (!cp) { log('no cue ball','warn'); return null; }
@@ -669,26 +726,22 @@
     const on8   = gs.on8||[];
     const grpSet = grps[gs.you]==='solids'||grps[gs.you]==='stripes';
 
-    // ── BREAK ────────────────────────────────────────────────────────────────
     if (!grpSet && !gs.groupLocked && !on8[gs.you] && live >= 10) {
       const b = breakShot(cp);
       if (b) return b;
     }
 
-    // ── RESOLVE TARGETS ──────────────────────────────────────────────────────
     const targets = resolveTargets(cp);
     if (!targets.length) return safetyShot(cp);
 
-    // ── SCORE ALL CANDIDATES ─────────────────────────────────────────────────
     let bestCandidate = null;
-    let bestTotal     = Infinity;
+    let bestTotal = Infinity;
 
     for (const idx of targets) {
       if (!gs.balls[idx]||!Array.isArray(gs.balls[idx])) continue;
-      const tgt            = {x:gs.balls[idx][0], y:gs.balls[idx][1]};
+      const tgt = {x:gs.balls[idx][0], y:gs.balls[idx][1]};
       const remainingAfter = targets.filter(i=>i!==idx);
 
-      // Collect all viable shots for this target ball
       const candidates = [];
 
       for (const p of POCKETS) {
@@ -704,15 +757,26 @@
 
       for (const shot of candidates) {
         const { spin, posScore } = optimiseSpin(cp, shot, remainingAfter);
-        const total = shot.baseScore + POS_WEIGHT * posScore;
+
+        const shotScore = (shot.baseScore || 0) + POS_WEIGHT * posScore;
+        const blockerPenalty =
+          ((shot.ballIdx !== undefined && shot.pocketId !== null) &&
+          (() => {
+            const targetBall = {x: gs.balls[shot.ballIdx][0], y: gs.balls[shot.ballIdx][1]};
+            const pocket = POCKETS[shot.pocketId];
+            return ballInFrontOfPocket(targetBall, pocket, shot.ballIdx, 0.18) !== null ? 400 : 0;
+          })()
+        );
+
+        const total = shotScore + blockerPenalty;
 
         if (total < bestTotal) {
-          bestTotal     = total;
+          bestTotal = total;
           bestCandidate = {
             ...shot,
-            ballIdx   : idx,
-            targetPos : tgt,
-            finalSpin : { spin_x: spin.sx, spin_y: spin.sy },
+            ballIdx: idx,
+            targetPos: tgt,
+            finalSpin: { spin_x: spin.sx, spin_y: spin.sy },
             posScore,
             total,
           };
@@ -726,16 +790,16 @@
     }
 
     log(
-      `GOD PICK ball[${bestCandidate.ballIdx}] ${bestCandidate.debug} `+
+      `V6 PICK ball[${bestCandidate.ballIdx}] ${bestCandidate.debug} `+
       `spin=(${bestCandidate.finalSpin.spin_x},${bestCandidate.finalSpin.spin_y}) `+
       `pos=${bestCandidate.posScore?.toFixed(2)} total=${bestCandidate.total?.toFixed(2)}`
     );
     return bestCandidate;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   //  FIRE
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   async function fireShot(force=false) {
     if (!force) {
       if (!BOT_ON)           { log('guard:OFF');      return; }
@@ -771,7 +835,6 @@
       log('aborted: changed during wait','warn'); PENDING=false; return;
     }
 
-    // Jitter: ±30 units = ±0.003° — effectively perfect
     const jitter = force ? 0 : Math.round((Math.random()-0.5) * 60);
 
     const body = {
@@ -832,9 +895,9 @@
     PENDING = false;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   //  RESYNC
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   async function resync() {
     if (!gs.gameId) return;
     for (const url of [`/api/pvp/pool/${gs.gameId}`,`/api/pvp/play/pool/${gs.gameId}`]) {
@@ -850,14 +913,14 @@
     log('resync: failed','err');
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   //  STATE
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   function applyGame(game) {
     if (!game||typeof game!=='object') return;
-    if (game.game_id)                            gs.gameId=game.game_id;
-    if (game.id && !gs.gameId)                   gs.gameId=game.id;
-    if (game.you!==undefined&&game.you!==null)   gs.you=game.you;
+    if (game.game_id) gs.gameId=game.game_id;
+    if (game.id && !gs.gameId) gs.gameId=game.id;
+    if (game.you!==undefined&&game.you!==null) gs.you=game.you;
 
     const s = game.state
       || (game.balls!==undefined ? game : null)
@@ -865,21 +928,21 @@
       || null;
     if (!s) return;
 
-    if (s.turn!==undefined)  gs.turn  = s.turn;
-    if (s.step!==undefined)  gs.step  = s.step;
+    if (s.turn!==undefined) gs.turn = s.turn;
+    if (s.step!==undefined) gs.step = s.step;
     if (s.balls!==undefined) gs.balls = s.balls;
 
     const gd = s.groups??s.group??s.sides??s.assignments??null;
     if (gd) {
       gs.groups = Array.isArray(gd) ? gd : Object.values(gd);
-      const sg  = gs.groups[gs.you];
+      const sg = gs.groups[gs.you];
       if (sg==='solids'||sg==='stripes') { gs.myGroup=sg; gs.groupLocked=true; }
     }
     if (gs.you!==null && !gs.groups[gs.you]) { gs.groupLocked=false; gs.myGroup=null; }
 
-    if (s.left!==undefined)  gs.left = s.left;
-    if (s.on8!==undefined)   gs.on8  = s.on8;
-    if ('bih' in s)          gs.bih  = s.bih;
+    if (s.left!==undefined) gs.left = s.left;
+    if (s.on8!==undefined) gs.on8 = s.on8;
+    if ('bih' in s) gs.bih = s.bih;
 
     if (game.status==='finished') {
       BOT_ON=false; updateToggleUI(); setStatus('🏁 Game finished'); refreshPanel(); return;
@@ -894,15 +957,15 @@
   // Poll fallback
   setInterval(()=>{
     if (!BOT_ON||PENDING||gs.you===null) return;
-    if (gs.turn!==gs.you||!gs.gameId)   return;
-    if (gs.step===LAST_STEP)            return;
+    if (gs.turn!==gs.you||!gs.gameId) return;
+    if (gs.step===LAST_STEP) return;
     log('poll trigger');
     fireShot();
   }, 1500);
 
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   //  INTERCEPTS
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   const _xo=XMLHttpRequest.prototype.open, _xs=XMLHttpRequest.prototype.send;
   XMLHttpRequest.prototype.open=function(m,u,...r){this.__url=u;return _xo.call(this,m,u,...r);};
   XMLHttpRequest.prototype.send=function(b){
@@ -953,9 +1016,9 @@
   };
   try{Object.assign(window.WebSocket,_WS);}catch(_){}
 
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   //  GUI
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   const LOGS=[];
   function log(msg,tag='info'){
     const line=`${new Date().toISOString().slice(11,19)} ${msg}`;
@@ -985,7 +1048,7 @@
         border-radius:10px 10px 0 0;display:flex;justify-content:space-between;
         align-items:center;cursor:move;border-bottom:1px solid #21262d;">
         <span style="color:#58a6ff;font-weight:bold;">
-          🎱 POOL BOT <span style="color:#f0883e;">GOD v5.1</span>
+          🎱 POOL BOT <span style="color:#f0883e;">GOD v6</span>
         </span>
         <div style="display:flex;align-items:center;gap:6px;">
           <span id="__pb_lbl__" style="font-size:9px;color:#484f58;">OFF</span>
@@ -1017,29 +1080,6 @@
           <div id="__pb_mgrp__" style="color:#58d68d;">—</div>
           <div id="__pb_on8__"  style="color:#8b949e;">—</div>
           <div id="__pb_cut__"  style="color:#8b949e;">—</div>
-        </div>
-      </div>
-
-      <div style="padding:5px 10px;border-bottom:1px solid #21262d;">
-        <div style="color:#484f58;font-size:8px;margin-bottom:4px;
-          text-transform:uppercase;letter-spacing:.5px;">Shot Delay (seconds)</div>
-        <div style="display:flex;gap:8px;align-items:center;">
-          <div style="flex:1;">
-            <div style="color:#8b949e;font-size:8px;margin-bottom:2px;">Min</div>
-            <input id="__pb_dmin__" type="number" min="0.5" max="29" step="0.5" value="${delay.min}"
-              style="width:100%;box-sizing:border-box;background:#0d1117;border:1px solid #30363d;
-              border-radius:4px;color:#58a6ff;font-family:monospace;font-size:11px;
-              padding:4px 6px;outline:none;text-align:center;"/>
-          </div>
-          <div style="color:#484f58;font-size:16px;padding-top:14px;">–</div>
-          <div style="flex:1;">
-            <div style="color:#8b949e;font-size:8px;margin-bottom:2px;">Max</div>
-            <input id="__pb_dmax__" type="number" min="1" max="30" step="0.5" value="${delay.max}"
-              style="width:100%;box-sizing:border-box;background:#0d1117;border:1px solid #30363d;
-              border-radius:4px;color:#58a6ff;font-family:monospace;font-size:11px;
-              padding:4px 6px;outline:none;text-align:center;"/>
-          </div>
-          <div id="__pb_davg__" style="padding-top:14px;font-size:8px;color:#484f58;white-space:nowrap;">~5.0s avg</div>
         </div>
       </div>
 
@@ -1082,15 +1122,6 @@
       BOT_ON=!BOT_ON; updateToggleUI();
       if(BOT_ON&&gs.you!==null&&gs.turn===gs.you&&!PENDING) setTimeout(()=>fireShot(),300);
     });
-
-    const dmin=root.querySelector('#__pb_dmin__'), dmax=root.querySelector('#__pb_dmax__');
-    function updDelay(){
-      let mn=parseFloat(dmin.value)||0.5, mx=parseFloat(dmax.value)||1;
-      if(mn>=mx)mx=mn+0.5; mn=Math.max(0.5,mn); mx=Math.max(mn+0.5,mx);
-      delay.min=mn; delay.max=mx; dmin.value=mn; dmax.value=mx;
-      root.querySelector('#__pb_davg__').textContent=`~${((mn+mx)/2).toFixed(1)}s avg`;
-    }
-    dmin.addEventListener('change',updDelay); dmax.addEventListener('change',updDelay);
 
     root.querySelector('#__pb_force__').addEventListener('click',()=>{
       PENDING=false;LAST_STEP=-1;if(PTIMER)clearTimeout(PTIMER);fireShot(true);
